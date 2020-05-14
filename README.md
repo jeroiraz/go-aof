@@ -54,10 +54,13 @@ func main() {
 		}
 	}
 
-	app.ForEach(func(e *aof.Entry) (cutoff bool, err error) {
+	err = app.ForEach(func(e *aof.Entry) (cutoff bool, err error) {
 		log.Printf("Entry at offset: %d has size: %d", e.Offset(), e.Size())
 		return false, nil
 	})
+    if err != nil {
+		panic(err)
+	}
 
 	fr, err := app.Filter(func(e *aof.Entry) (include bool, cutoff bool, err error) {
 		return e.Ignore(), false, nil
