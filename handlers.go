@@ -6,11 +6,11 @@ type gFoldHandler struct {
 }
 
 func (h *gFoldHandler) Fold(e *Entry) (bool, error) {
-	nv, concluded, err := h.f(e, h.v)
+	nv, cutoff, err := h.f(e, h.v)
 	if err == nil {
 		h.v = nv
 	}
-	return concluded, err
+	return cutoff, err
 }
 
 func (h *gFoldHandler) Value() interface{} {
@@ -43,11 +43,11 @@ type filterHandler struct {
 }
 
 func (h *filterHandler) Fold(e *Entry) (bool, error) {
-	v, concluded, err := h.f(e)
+	v, cutoff, err := h.f(e)
 	if err == nil && v {
 		h.ls = append(h.ls, e)
 	}
-	return concluded, err
+	return cutoff, err
 }
 
 func (h *filterHandler) Value() interface{} {
@@ -68,11 +68,11 @@ type mapHandler struct {
 }
 
 func (h *mapHandler) Fold(e *Entry) (bool, error) {
-	l, concluded, err := h.f(e)
+	l, cutoff, err := h.f(e)
 	if err == nil {
 		h.ls = append(h.ls, l)
 	}
-	return concluded, err
+	return cutoff, err
 }
 
 func (h *mapHandler) Value() interface{} {
@@ -94,15 +94,15 @@ type filteredMapHandler struct {
 }
 
 func (h *filteredMapHandler) Fold(e *Entry) (bool, error) {
-	v, concludedf, err := h.f(e)
+	v, fcutoff, err := h.f(e)
 	if err == nil && v {
-		l, concludedm, err := h.m(e)
+		l, mcutoff, err := h.m(e)
 		if err == nil {
 			h.ls = append(h.ls, l)
 		}
-		return concludedf || concludedm, err
+		return fcutoff || mcutoff, err
 	}
-	return concludedf, err
+	return fcutoff, err
 }
 
 func (h *filteredMapHandler) Value() interface{} {
@@ -123,9 +123,7 @@ type sizeFoldHandler struct {
 }
 
 func (h *sizeFoldHandler) Fold(e *Entry) (bool, error) {
-	if e.size > 0 && !e.ignore {
-		h.size += int64(len(h.app.sharedMem.bufEntrySize) + e.size + len(h.app.sharedMem.bufEntryFlag))
-	}
+	h.size += int64(len(h.app.sharedMem.bufEntrySize) + e.size + len(h.app.sharedMem.bufEntryFlag))
 	return false, nil
 }
 
