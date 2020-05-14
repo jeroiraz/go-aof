@@ -13,8 +13,6 @@ go get github.com/jeroiraz/go-aof
 ```go
 package main
 
-package main
-
 import (
 	"log"
 	"math/rand"
