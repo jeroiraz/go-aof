@@ -1,7 +1,6 @@
 package aof
 
 import (
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"testing"
@@ -21,16 +20,11 @@ func randomBytes(size int) []byte {
 }
 
 func TestEmptyFile(t *testing.T) {
-	f, err := ioutil.TempFile(".", "test_file.aof")
+	app, err := Open("test_file.aof")
 	if err != nil {
 		t.Errorf("Unexpected error %v", err)
 	}
-	defer os.Remove(f.Name())
-
-	app, err := New(f)
-	if err != nil {
-		t.Errorf("Unexpected error %v", err)
-	}
+	defer os.Remove("test_file.aof")
 
 	b := randomBytes(1)
 	off, err := app.Append(b)
@@ -41,4 +35,6 @@ func TestEmptyFile(t *testing.T) {
 	if off != 0 {
 		t.Errorf("Expected offset to be 0 but %d was returned instead", off)
 	}
+
+	app.Close()
 }

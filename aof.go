@@ -7,12 +7,9 @@
 // )
 //
 // func main() {
-//   f, err := os.OpenFile("test_file.aof", os.O_CREATE|os.O_RDWR, 0666)
+//   app, err := app.Open("test_file.aof")
 //   // error handling
-//   defer f.Close()
-//
-//   app, err := aof.New(f)
-//   // error handling
+//   defer app.Close()
 //
 //   var bs []byte
 //   // put some data into slice and append to file using the appender
@@ -70,6 +67,13 @@ type Appender struct {
 	sharedMem    *sharedMem
 }
 
+type Options struct {
+	initialOffset int64
+	maxEntrySize  int
+	perm          os.FileMode
+	readOnly      bool
+}
+
 type Entry struct {
 	off    int64
 	size   int
@@ -100,18 +104,43 @@ const (
 
 var byteOrder = binary.LittleEndian
 
-func New(f *os.File) (app *Appender, err error) {
-	return NewSizeOffset(f, DefaultMaxEntrySize, 0)
+func Open(filename string) (app *Appender, err error) {
+	return OpenOptions(filename, &Options{initialOffset: 0, maxEntrySize: DefaultMaxEntrySize, perm: 0644})
 }
 
-func NewSizeOffset(f *os.File, maxEntrySize int, off int64) (app *Appender, err error) {
-	if maxEntrySize < 1 || off < 0 {
+func OpenOptions(filename string, opts *Options) (app *Appender, err error) {
+	if opts.maxEntrySize < 1 || opts.initialOffset < 0 {
 		return nil, ErrInvalidArguments
 	}
 
-	app = &Appender{f: f, r: bufio.NewReader(f), w: bufio.NewWriter(f), maxEntrySize: maxEntrySize, off0: off, size: 0}
+	var flag int
+	if opts.readOnly {
+		flag = os.O_RDONLY
+	} else {
+		flag = os.O_CREATE | os.O_RDWR | os.O_APPEND
+	}
+
+	f, err := os.OpenFile(filename, flag, opts.perm)
+	if err != nil {
+		return nil, err
+	}
+
+	app = &Appender{
+		f:            f,
+		r:            bufio.NewReader(f),
+		w:            bufio.NewWriter(f),
+		maxEntrySize: opts.maxEntrySize,
+		off0:         opts.initialOffset,
+		size:         0,
+	}
+
 	err = app.init()
+
 	return
+}
+
+func (app *Appender) Close() error {
+	return app.f.Close()
 }
 
 // Initialize appender. ErrLastRecordIgnored is returned if last entry could not be fully read

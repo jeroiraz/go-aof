@@ -16,7 +16,6 @@ package main
 import (
 	"log"
 	"math/rand"
-	"os"
 	"time"
 
 	"github.com/jeroiraz/go-aof"
@@ -35,16 +34,11 @@ func randomBytes(size int) []byte {
 }
 
 func main() {
-	f, err := os.OpenFile("test_file.aof", os.O_CREATE|os.O_RDWR, 0666)
+	app, err := aof.Open("file.aof")
 	if err != nil {
 		panic(err)
 	}
-	defer f.Close()
-
-	app, err := aof.New(f)
-	if err != nil {
-		panic(err)
-	}
+	defer app.Close()
 
 	for i := 1; i <= 10; i++ {
 		b := randomBytes(i)
@@ -58,7 +52,7 @@ func main() {
 		log.Printf("Entry at offset: %d has size: %d", e.Offset(), e.Size())
 		return false, nil
 	})
-    if err != nil {
+	if err != nil {
 		panic(err)
 	}
 
@@ -78,6 +72,5 @@ func main() {
 	}
 
 	log.Printf("Sizes: %v", mr)
-
 }
 ```
