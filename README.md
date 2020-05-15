@@ -56,14 +56,6 @@ func main() {
 		panic(err)
 	}
 
-	fr, err := app.Filter(func(e *aof.Entry) (include bool, cutoff bool, err error) {
-		return e.Incomplete(), false, nil
-	})
-	if err != nil {
-		panic(err)
-	}
-	log.Printf("Incomplete entries %v", len(fr))
-
 	mr, err := app.Map(func(e *aof.Entry) (size interface{}, cutoff bool, err error) {
 		return e.Size(), false, nil
 	})

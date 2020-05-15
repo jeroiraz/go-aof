@@ -37,31 +37,6 @@ func (h *forEachHandler) Values() []interface{} {
 	return nil
 }
 
-type filterHandler struct {
-	f  FilterFn
-	ls []*Entry
-}
-
-func (h *filterHandler) Fold(e *Entry) (bool, error) {
-	v, cutoff, err := h.f(e)
-	if err == nil && v {
-		h.ls = append(h.ls, e)
-	}
-	return cutoff, err
-}
-
-func (h *filterHandler) Value() interface{} {
-	return nil
-}
-
-func (h *filterHandler) Values() []interface{} {
-	ls := make([]interface{}, len(h.ls))
-	for i, e := range h.ls {
-		ls[i] = e
-	}
-	return ls
-}
-
 type mapHandler struct {
 	f  MapFn
 	ls []interface{}
@@ -123,7 +98,7 @@ type sizeFoldHandler struct {
 }
 
 func (h *sizeFoldHandler) Fold(e *Entry) (bool, error) {
-	h.size += int64(len(h.app.sharedMem.bufEntrySize) + e.size + len(h.app.sharedMem.bufEntryFlag))
+	h.size += int64(len(h.app.sharedMem.bufRWEntrySize) + e.size + len(h.app.sharedMem.bufRWEntryFlag))
 	return false, nil
 }
 

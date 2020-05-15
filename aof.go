@@ -1,4 +1,4 @@
-// Package aof implements a minimalist append-only file API with build-in map/filter/fold operators
+// Package aof implements a minimalist append-only file API with build-in fold-powered operators
 //
 // package main
 // import (
@@ -6,13 +6,14 @@
 //   "github.com/jeroiraz/go-aof"
 // )
 //
+// // Note: Error handling not included
+//
 // func main() {
 //   app, err := app.Open("test_file.aof")
-//   // error handling
 //   defer app.Close()
 //
-//   var bs []byte
 //   // put some data into slice and append to file using the appender
+//   var bs []byte
 //   off, err := app.Append(bs)
 //
 //   app.ForEach(func(e *aof.Entry) (cutoff bool, err error) {
@@ -20,16 +21,9 @@
 //       return false, nil
 //   })
 //
-//   fr, err := app.Filter(func(e *aof.Entry) (include bool, cutoff bool, err error) {
-//       return e.Incomplete(), false, nil
-//   })
-//   // error handling
-//   log.Printf("Incomplete entries %v", len(fr))
-//
 //   mr, err := app.Map(func(e *aof.Entry) (size interface{}, cutoff bool, err error) {
 //       return e.Size(), false, nil
 //   })
-//   // error handling
 //   log.Printf("Sizes: %v", mr)
 // }
 package aof
@@ -46,8 +40,8 @@ import (
 
 var (
 	ErrUnexpectedReadError = errors.New("aof: Unexpected error reading file")
-	ErrCompletingLastEntry = errors.New("aof: Error completing last entry")
-	ErrLastEntryIncomplete = errors.New("aof: Last entry was incomplete")
+	ErrCompletingLastEntry = errors.New("aof: Error completing last Entry")
+	ErrLastEntryIncomplete = errors.New("aof: Last Entry was incomplete")
 	ErrInvalidArguments    = errors.New("aof: Invalid arguments")
 	ErrUnexpectedWriteErr  = errors.New("aof: Unexpected error writing file")
 	ErrEntryExceedsMaxSize = errors.New("aof: Entry exceeds max supported size")
@@ -92,14 +86,16 @@ type FoldHandler interface {
 	Values() []interface{}
 }
 
-type FoldFn func(*Entry, interface{}) (red interface{}, cutoff bool, err error)
-type ForEachFn func(*Entry) (cutoff bool, err error)
-type MapFn func(*Entry) (ls interface{}, cutoff bool, err error)
-type FilterFn func(*Entry) (include bool, cutoff bool, err error)
+// Note: entry may be used as a shared memory and it should not leave its intended scope
+type FoldFn func(e *Entry, pred interface{}) (red interface{}, cutoff bool, err error)
+type ForEachFn func(e *Entry) (cutoff bool, err error)
+type MapFn func(e *Entry) (r interface{}, cutoff bool, err error)
+type FilterFn func(e *Entry) (include bool, cutoff bool, err error)
 
 type sharedMem struct {
-	bufEntrySize []byte
-	bufEntryFlag []byte
+	sharedEntry    *Entry
+	bufRWEntrySize []byte
+	bufRWEntryFlag []byte
 }
 
 const (
@@ -136,6 +132,12 @@ func OpenWithConfig(filename string, cfg *Config) (app *Appender, err error) {
 		return nil, err
 	}
 
+	sharedMem := &sharedMem{
+		sharedEntry:    &Entry{size: 0, bytes: make([]byte, cfg.MaxEntrySize)},
+		bufRWEntrySize: make([]byte, entrySizeLen(cfg.MaxEntrySize)),
+		bufRWEntryFlag: make([]byte, 1),
+	}
+
 	app = &Appender{
 		f:            f,
 		r:            bufio.NewReader(f),
@@ -143,11 +145,14 @@ func OpenWithConfig(filename string, cfg *Config) (app *Appender, err error) {
 		maxEntrySize: cfg.MaxEntrySize,
 		baseOffset:   cfg.BaseOffset,
 		size:         0,
+		sharedMem:    sharedMem,
 		closed:       false,
 		err:          nil,
 	}
 
-	err = app.init()
+	handler := &sizeFoldHandler{app: app, size: 0}
+	err = app.FoldWithHandler(handler)
+	app.size = handler.size
 
 	return
 }
@@ -163,20 +168,6 @@ func (app *Appender) close(err error) error {
 	app.closed = true
 	app.err = err
 	return app.f.Close()
-}
-
-// Initialize appender. ErrLastRecordIncomplete is returned if last entry could not be fully read
-func (app *Appender) init() error {
-	app.sharedMem = &sharedMem{
-		bufEntrySize: make([]byte, entrySizeLen(app.maxEntrySize)),
-		bufEntryFlag: make([]byte, 1),
-	}
-
-	handler := &sizeFoldHandler{app: app, size: 0}
-	err := app.FoldWithHandler(handler)
-	app.size = handler.size
-
-	return err
 }
 
 func (app *Appender) seek(off int64) error {
@@ -224,11 +215,11 @@ func writeInt(b []byte, n int) {
 // read fills up entry. Number of bytes missing to complete the entry is returned
 func (e *Entry) read(app *Appender) (int, error) {
 	// Read entry size
-	for i := range app.sharedMem.bufEntrySize {
-		app.sharedMem.bufEntrySize[i] = 0
+	for i := range app.sharedMem.bufRWEntrySize {
+		app.sharedMem.bufRWEntrySize[i] = 0
 	}
 
-	n, err := app.r.Read(app.sharedMem.bufEntrySize)
+	n, err := app.r.Read(app.sharedMem.bufRWEntrySize)
 	if err != nil && err != io.EOF {
 		return 0, ErrUnexpectedReadError
 	}
@@ -238,7 +229,7 @@ func (e *Entry) read(app *Appender) (int, error) {
 		return 0, err
 	}
 
-	e.size = readInt(app.sharedMem.bufEntrySize)
+	e.size = readInt(app.sharedMem.bufRWEntrySize)
 
 	if e.bytes == nil || len(e.bytes) < e.size {
 		e.bytes = make([]byte, e.size)
@@ -246,7 +237,7 @@ func (e *Entry) read(app *Appender) (int, error) {
 
 	// Read entry content if size could be fully read
 	rc := 0
-	if n == len(app.sharedMem.bufEntrySize) {
+	if n == len(app.sharedMem.bufRWEntrySize) {
 		for rc < e.size && err == nil {
 			rc, err = app.r.Read(e.bytes[:e.size])
 			if err != nil && err != io.EOF {
@@ -256,18 +247,18 @@ func (e *Entry) read(app *Appender) (int, error) {
 	}
 
 	// Read entry flag
-	app.sharedMem.bufEntryFlag[0] = 0
+	app.sharedMem.bufRWEntryFlag[0] = 0
 	if rc == e.size {
-		_, err = app.r.Read(app.sharedMem.bufEntryFlag)
+		_, err = app.r.Read(app.sharedMem.bufRWEntryFlag)
 		if err != nil && err != io.EOF {
 			return 0, ErrUnexpectedReadError
 		}
 	}
 
-	e.incomplete = app.sharedMem.bufEntryFlag[0] != fCompleteEntry
+	e.incomplete = app.sharedMem.bufRWEntryFlag[0] != fCompleteEntry
 
-	missingBytes := (len(app.sharedMem.bufEntrySize) - n) + (e.size - rc)
-	if app.sharedMem.bufEntryFlag[0] == 0 {
+	missingBytes := (len(app.sharedMem.bufRWEntrySize) - n) + (e.size - rc)
+	if app.sharedMem.bufRWEntryFlag[0] == 0 {
 		missingBytes++
 	}
 
@@ -307,9 +298,9 @@ func (app *Appender) AppendBulk(bss [][]byte) (offs []int64, err error) {
 		}
 
 		// Write encoded entry size
-		writeInt(app.sharedMem.bufEntrySize, len(bs))
-		n, err := app.w.Write(app.sharedMem.bufEntrySize)
-		if n != len(app.sharedMem.bufEntrySize) || err != nil {
+		writeInt(app.sharedMem.bufRWEntrySize, len(bs))
+		n, err := app.w.Write(app.sharedMem.bufRWEntrySize)
+		if n != len(app.sharedMem.bufRWEntrySize) || err != nil {
 			app.close(err)
 			return nil, ErrUnexpectedWriteErr
 		}
@@ -328,7 +319,7 @@ func (app *Appender) AppendBulk(bss [][]byte) (offs []int64, err error) {
 		}
 
 		offs[i] = app.size + writtenBytes
-		writtenBytes += int64(len(app.sharedMem.bufEntrySize) + len(bs) + len(app.sharedMem.bufEntryFlag))
+		writtenBytes += int64(len(app.sharedMem.bufRWEntrySize) + len(bs) + len(app.sharedMem.bufRWEntryFlag))
 	}
 
 	if err = app.w.Flush(); err != nil {
@@ -341,7 +332,7 @@ func (app *Appender) AppendBulk(bss [][]byte) (offs []int64, err error) {
 	return offs, nil
 }
 
-func (app *Appender) Read(off int64) (*Entry, error) {
+func (app *Appender) Read(off int64) (e *Entry, err error) {
 	app.mux.Lock()
 	defer app.mux.Unlock()
 
@@ -357,8 +348,8 @@ func (app *Appender) Read(off int64) (*Entry, error) {
 		return nil, ErrUnexpectedReadError
 	}
 
-	e := &Entry{off: off}
-	_, err := e.read(app)
+	e = &Entry{off: off}
+	_, err = e.read(app)
 
 	return e, err
 }
@@ -367,27 +358,21 @@ func (app *Appender) ForEach(f ForEachFn) error {
 	return app.FoldWithHandler(&forEachHandler{f: f})
 }
 
-func (app *Appender) Map(f MapFn) ([]interface{}, error) {
+func (app *Appender) Map(f MapFn) (ls []interface{}, err error) {
 	handler := &mapHandler{f: f, ls: nil}
-	err := app.FoldWithHandler(handler)
+	err = app.FoldWithHandler(handler)
 	return handler.Values(), err
 }
 
-func (app *Appender) Filter(f FilterFn) ([]interface{}, error) {
-	handler := &filterHandler{f: f, ls: nil}
-	err := app.FoldWithHandler(handler)
-	return handler.Values(), err
-}
-
-func (app *Appender) FilteredMap(f FilterFn, m MapFn) ([]interface{}, error) {
+func (app *Appender) FilteredMap(f FilterFn, m MapFn) (ls []interface{}, err error) {
 	handler := &filteredMapHandler{f: f, m: m, ls: nil}
-	err := app.FoldWithHandler(handler)
+	err = app.FoldWithHandler(handler)
 	return handler.Values(), err
 }
 
-func (app *Appender) Fold(f FoldFn, v interface{}) (interface{}, error) {
+func (app *Appender) Fold(f FoldFn, v interface{}) (ret interface{}, err error) {
 	handler := &gFoldHandler{f: f, v: v}
-	err := app.FoldWithHandler(handler)
+	err = app.FoldWithHandler(handler)
 	return handler.Value(), err
 }
 
@@ -399,7 +384,7 @@ func (app *Appender) FoldWithHandler(handler FoldHandler) error {
 		return ErrAppenderClosed
 	}
 
-	sharedEntry := &Entry{size: 0, bytes: make([]byte, app.maxEntrySize)}
+	sharedEntry := app.sharedMem.sharedEntry
 
 	var off int64 = 0
 	err := app.seek(0)
@@ -443,6 +428,6 @@ func (app *Appender) FoldWithHandler(handler FoldHandler) error {
 			return err
 		}
 
-		off += int64(len(app.sharedMem.bufEntrySize) + sharedEntry.size + len(app.sharedMem.bufEntryFlag))
+		off += int64(len(app.sharedMem.bufRWEntrySize) + sharedEntry.size + len(app.sharedMem.bufRWEntryFlag))
 	}
 }
