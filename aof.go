@@ -212,6 +212,28 @@ func writeInt(b []byte, n int) {
 	panic("Unreacheable point")
 }
 
+func (app *Appender) readNBytes(b []byte, n int) (int, error) {
+	if b == nil || len(b) < n || n < 1 {
+		return 0, ErrInvalidArguments
+	}
+
+	r := 0
+	for r < n {
+		i, err := app.r.Read(b[r:n])
+		r += i
+
+		if err != nil {
+			if err == io.EOF {
+				return r, err
+			}
+
+			app.err = err
+			return r, ErrUnexpectedReadError
+		}
+	}
+	return r, nil
+}
+
 // read fills up entry. Number of bytes missing to complete the entry is returned
 func (e *Entry) read(app *Appender) (int, error) {
 	// Read entry size
@@ -219,9 +241,9 @@ func (e *Entry) read(app *Appender) (int, error) {
 		app.sharedMem.bufRWEntrySize[i] = 0
 	}
 
-	n, err := app.r.Read(app.sharedMem.bufRWEntrySize)
+	n, err := app.readNBytes(app.sharedMem.bufRWEntrySize, len(app.sharedMem.bufRWEntrySize))
 	if err != nil && err != io.EOF {
-		return 0, ErrUnexpectedReadError
+		return 0, err
 	}
 
 	if n == 0 {
@@ -238,12 +260,9 @@ func (e *Entry) read(app *Appender) (int, error) {
 	// Read entry content if size could be fully read
 	rc := 0
 	if n == len(app.sharedMem.bufRWEntrySize) {
-		for rc < e.size && err == nil {
-			nc, err := app.r.Read(e.bytes[rc:e.size])
-			if err != nil && err != io.EOF {
-				return 0, ErrUnexpectedReadError
-			}
-			rc += nc
+		rc, err = app.readNBytes(e.bytes, e.size)
+		if err != nil && err != io.EOF {
+			return 0, ErrUnexpectedReadError
 		}
 	}
 
