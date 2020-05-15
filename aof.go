@@ -269,7 +269,7 @@ func (e *Entry) read(app *Appender) (int, error) {
 	// Read entry flag
 	app.sharedMem.bufRWEntryFlag[0] = 0
 	if rc == e.size {
-		_, err = app.r.Read(app.sharedMem.bufRWEntryFlag)
+		_, err = app.readNBytes(app.sharedMem.bufRWEntryFlag, len(app.sharedMem.bufRWEntryFlag))
 		if err != nil && err != io.EOF {
 			return 0, ErrUnexpectedReadError
 		}
