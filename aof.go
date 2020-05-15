@@ -54,6 +54,7 @@ var (
 	ErrInvalidArguments    = errors.New("aof: Invalid arguments")
 	ErrUnexpectedWriteErr  = errors.New("aof: Unexpected error writing file")
 	ErrEntryExceedsMaxSize = errors.New("aof: Entry exceeds max supported size")
+	ErrAppenderClosed      = errors.New("aof: Appender closed")
 )
 
 type Appender struct {
@@ -65,6 +66,8 @@ type Appender struct {
 	off0         int64
 	size         int64
 	sharedMem    *sharedMem
+	closed       bool
+	err          error
 }
 
 type Options struct {
@@ -132,6 +135,8 @@ func OpenOptions(filename string, opts *Options) (app *Appender, err error) {
 		maxEntrySize: opts.maxEntrySize,
 		off0:         opts.initialOffset,
 		size:         0,
+		closed:       false,
+		err:          nil,
 	}
 
 	err = app.init()
@@ -140,6 +145,15 @@ func OpenOptions(filename string, opts *Options) (app *Appender, err error) {
 }
 
 func (app *Appender) Close() error {
+	app.mux.Lock()
+	defer app.mux.Unlock()
+
+	return app.close(nil)
+}
+
+func (app *Appender) close(err error) error {
+	app.closed = true
+	app.err = err
 	return app.f.Close()
 }
 
@@ -252,62 +266,91 @@ func (e *Entry) read(app *Appender) (int, error) {
 	return missingBytes, err
 }
 
-func (app *Appender) Append(bs []byte) (int64, error) {
+func (app *Appender) Append(bs []byte) (off int64, err error) {
+	offs, err := app.AppendBulk([][]byte{bs})
+	if err != nil {
+		return 0, err
+	}
+	return offs[0], nil
+}
+
+func (app *Appender) AppendBulk(bss [][]byte) (offs []int64, err error) {
 	app.mux.Lock()
 	defer app.mux.Unlock()
 
-	if bs == nil || len(bs) == 0 {
-		return 0, ErrInvalidArguments
-	}
-	if len(bs) > app.maxEntrySize {
-		return 0, ErrEntryExceedsMaxSize
+	if app.closed {
+		return nil, ErrAppenderClosed
 	}
 
-	// Write encoded entry size
-	writeInt(app.sharedMem.bufEntrySize, len(bs))
-	n, err := app.w.Write(app.sharedMem.bufEntrySize)
-	if n != len(app.sharedMem.bufEntrySize) || err != nil {
-		return 0, ErrUnexpectedWriteErr
+	if bss == nil || len(bss) == 0 {
+		return nil, ErrInvalidArguments
 	}
 
-	// Write entry
-	n, err = app.w.Write(bs)
-	if n != len(bs) || err != nil {
-		return 0, ErrUnexpectedWriteErr
+	offs = make([]int64, len(bss))
+
+	var writtenBytes int64 = 0
+
+	for i, bs := range bss {
+		if bs == nil || len(bs) == 0 {
+			return nil, ErrInvalidArguments
+		}
+		if len(bs) > app.maxEntrySize {
+			return nil, ErrEntryExceedsMaxSize
+		}
+
+		// Write encoded entry size
+		writeInt(app.sharedMem.bufEntrySize, len(bs))
+		n, err := app.w.Write(app.sharedMem.bufEntrySize)
+		if n != len(app.sharedMem.bufEntrySize) || err != nil {
+			app.close(err)
+			return nil, ErrUnexpectedWriteErr
+		}
+
+		// Write entry
+		n, err = app.w.Write(bs)
+		if n != len(bs) || err != nil {
+			app.close(err)
+			return nil, ErrUnexpectedWriteErr
+		}
+
+		// Flag as valid entry
+		if err = app.w.WriteByte(fCompleteEntry); err != nil {
+			app.close(err)
+			return nil, ErrUnexpectedWriteErr
+		}
+
+		offs[i] = app.size + writtenBytes
+		writtenBytes += int64(len(app.sharedMem.bufEntrySize) + len(bs) + len(app.sharedMem.bufEntryFlag))
 	}
 
-	// Flag as valid entry
-	err = app.w.WriteByte(fCompleteEntry)
-	if err != nil {
-		return 0, ErrUnexpectedWriteErr
+	if err = app.w.Flush(); err != nil {
+		app.close(err)
+		return nil, ErrUnexpectedWriteErr
 	}
 
-	err = app.w.Flush()
-	if err != nil {
-		return 0, ErrUnexpectedWriteErr
-	}
+	app.size += writtenBytes
 
-	off := app.size
-	app.size += int64(len(app.sharedMem.bufEntrySize) + len(bs) + len(app.sharedMem.bufEntryFlag))
-
-	return off, nil
+	return offs, nil
 }
 
 func (app *Appender) Read(off int64) (*Entry, error) {
 	app.mux.Lock()
 	defer app.mux.Unlock()
 
+	if app.closed {
+		return nil, ErrAppenderClosed
+	}
+
 	if off < 0 || off > app.size {
 		return nil, ErrInvalidArguments
 	}
 
-	err := app.seek(off)
-	if err != nil {
+	if err := app.seek(off); err != nil {
 		return nil, ErrUnexpectedReadError
 	}
 
 	e := &Entry{off: off}
-	_, err = e.read(app)
+	_, err := e.read(app)
 
 	return e, err
 }
@@ -344,6 +387,10 @@ func (app *Appender) FoldWithHandler(handler FoldHandler) error {
 	app.mux.Lock()
 	defer app.mux.Unlock()
 
+	if app.closed {
+		return ErrAppenderClosed
+	}
+
 	sharedEntry := &Entry{size: 0, bytes: make([]byte, app.maxEntrySize)}
 
 	var off int64 = 0
@@ -363,10 +410,12 @@ func (app *Appender) FoldWithHandler(handler FoldHandler) error {
 
 			n, err := app.w.Write(bs)
 			if n != mb || err != nil {
+				app.close(err)
 				return ErrCompletingLastEntry
 			}
 
 			if err = app.w.Flush(); err != nil {
+				app.close(err)
 				return ErrCompletingLastEntry
 			}
 
