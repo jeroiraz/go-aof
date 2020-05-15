@@ -57,14 +57,14 @@ func main() {
 	}
 
 	fr, err := app.Filter(func(e *aof.Entry) (include bool, cutoff bool, err error) {
-		return e.Ignore(), false, nil
+		return e.Incomplete(), false, nil
 	})
 	if err != nil {
 		panic(err)
 	}
-	log.Printf("Ignored entries %v", len(fr))
+	log.Printf("Incomplete entries %v", len(fr))
 
-	mr, err := app.Map(func(e *aof.Entry) (ignored interface{}, cutoff bool, err error) {
+	mr, err := app.Map(func(e *aof.Entry) (size interface{}, cutoff bool, err error) {
 		return e.Size(), false, nil
 	})
 	if err != nil {

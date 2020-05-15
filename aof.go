@@ -21,12 +21,12 @@
 //   })
 //
 //   fr, err := app.Filter(func(e *aof.Entry) (include bool, cutoff bool, err error) {
-//       return e.Ignore(), false, nil
+//       return e.Incomplete(), false, nil
 //   })
 //   // error handling
-//   log.Printf("Ignored entries %v", len(fr))
+//   log.Printf("Incomplete entries %v", len(fr))
 //
-//   mr, err := app.Map(func(e *aof.Entry) (ignored interface{}, cutoff bool, err error) {
+//   mr, err := app.Map(func(e *aof.Entry) (size interface{}, cutoff bool, err error) {
 //       return e.Size(), false, nil
 //   })
 //   // error handling
@@ -50,7 +50,7 @@ const DefaultMaxEntrySize = 65535
 var (
 	ErrUnexpectedReadError = errors.New("aof: Unexpected error reading file")
 	ErrCompletingLastEntry = errors.New("aof: Error completing last entry")
-	ErrLastEntryIgnored    = errors.New("aof: Last entry fixed and ignored")
+	ErrLastEntryIncomplete = errors.New("aof: Last entry was incomplete")
 	ErrInvalidArguments    = errors.New("aof: Invalid arguments")
 	ErrUnexpectedWriteErr  = errors.New("aof: Unexpected error writing file")
 	ErrEntryExceedsMaxSize = errors.New("aof: Entry exceeds max supported size")
@@ -75,10 +75,10 @@ type Options struct {
 }
 
 type Entry struct {
-	off    int64
-	size   int
-	bytes  []byte
-	ignore bool
+	off        int64
+	size       int
+	bytes      []byte
+	incomplete bool
 }
 
 type FoldHandler interface {
@@ -98,8 +98,8 @@ type sharedMem struct {
 }
 
 const (
-	fIgnoreEntry uint8 = 1 << iota
-	fValidEntry
+	fIncompleteEntry uint8 = 1 << iota
+	fCompleteEntry
 )
 
 var byteOrder = binary.LittleEndian
@@ -143,7 +143,7 @@ func (app *Appender) Close() error {
 	return app.f.Close()
 }
 
-// Initialize appender. ErrLastRecordIgnored is returned if last entry could not be fully read
+// Initialize appender. ErrLastRecordIncomplete is returned if last entry could not be fully read
 func (app *Appender) init() error {
 	app.sharedMem = &sharedMem{
 		bufEntrySize: make([]byte, entrySizeLen(app.maxEntrySize)),
@@ -242,7 +242,7 @@ func (e *Entry) read(app *Appender) (int, error) {
 		}
 	}
 
-	e.ignore = app.sharedMem.bufEntryFlag[0] != fValidEntry
+	e.incomplete = app.sharedMem.bufEntryFlag[0] != fCompleteEntry
 
 	missingBytes := (len(app.sharedMem.bufEntrySize) - n) + (e.size - rc)
 	if app.sharedMem.bufEntryFlag[0] == 0 {
@@ -277,7 +277,7 @@ func (app *Appender) Append(bs []byte) (int64, error) {
 	}
 
 	// Flag as valid entry
-	err = app.w.WriteByte(fValidEntry)
+	err = app.w.WriteByte(fCompleteEntry)
 	if err != nil {
 		return 0, ErrUnexpectedWriteErr
 	}
@@ -356,10 +356,10 @@ func (app *Appender) FoldWithHandler(handler FoldHandler) error {
 		sharedEntry.off = off
 		mb, err := sharedEntry.read(app)
 
-		// Complete & Ignore last entry if less bytes has been read
+		// Complete last entry if less bytes has been read
 		if mb > 0 {
 			bs := make([]byte, mb)
-			bs[mb-1] = fIgnoreEntry
+			bs[mb-1] = fIncompleteEntry
 
 			n, err := app.w.Write(bs)
 			if n != mb || err != nil {
@@ -370,7 +370,7 @@ func (app *Appender) FoldWithHandler(handler FoldHandler) error {
 				return ErrCompletingLastEntry
 			}
 
-			err = ErrLastEntryIgnored
+			err = ErrLastEntryIncomplete
 		}
 
 		if err == io.EOF {
