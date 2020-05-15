@@ -44,9 +44,6 @@ import (
 	"sync"
 )
 
-// DefaultMaxEntrySize default max entry size
-const DefaultMaxEntrySize = 65535
-
 var (
 	ErrUnexpectedReadError = errors.New("aof: Unexpected error reading file")
 	ErrCompletingLastEntry = errors.New("aof: Error completing last entry")
@@ -63,19 +60,24 @@ type Appender struct {
 	w            *bufio.Writer
 	mux          sync.Mutex
 	maxEntrySize int
-	off0         int64
+	baseOffset   int64
 	size         int64
 	sharedMem    *sharedMem
 	closed       bool
 	err          error
 }
 
-type Options struct {
-	initialOffset int64
-	maxEntrySize  int
-	perm          os.FileMode
-	readOnly      bool
+type Config struct {
+	MaxEntrySize int
+	BaseOffset   int64
+	Perm         os.FileMode
+	ReadOnly     bool
 }
+
+const DefaultMaxEntrySize = 65535
+const DefaultBaseOffset = 0
+const DefaultPerm = 0644
+const DefaultReadOnly = false
 
 type Entry struct {
 	off        int64
@@ -108,22 +110,28 @@ const (
 var byteOrder = binary.LittleEndian
 
 func Open(filename string) (app *Appender, err error) {
-	return OpenOptions(filename, &Options{initialOffset: 0, maxEntrySize: DefaultMaxEntrySize, perm: 0644})
+	defaultCfg := &Config{
+		MaxEntrySize: DefaultMaxEntrySize,
+		BaseOffset:   DefaultBaseOffset,
+		Perm:         DefaultPerm,
+		ReadOnly:     DefaultReadOnly,
+	}
+	return OpenWithConfig(filename, defaultCfg)
 }
 
-func OpenOptions(filename string, opts *Options) (app *Appender, err error) {
-	if opts.maxEntrySize < 1 || opts.initialOffset < 0 {
+func OpenWithConfig(filename string, cfg *Config) (app *Appender, err error) {
+	if cfg.MaxEntrySize < 1 || cfg.BaseOffset < 0 {
 		return nil, ErrInvalidArguments
 	}
 
 	var flag int
-	if opts.readOnly {
+	if cfg.ReadOnly {
 		flag = os.O_RDONLY
 	} else {
 		flag = os.O_CREATE | os.O_RDWR | os.O_APPEND
 	}
 
-	f, err := os.OpenFile(filename, flag, opts.perm)
+	f, err := os.OpenFile(filename, flag, cfg.Perm)
 	if err != nil {
 		return nil, err
 	}
@@ -132,8 +140,8 @@ func OpenOptions(filename string, opts *Options) (app *Appender, err error) {
 		f:            f,
 		r:            bufio.NewReader(f),
 		w:            bufio.NewWriter(f),
-		maxEntrySize: opts.maxEntrySize,
-		off0:         opts.initialOffset,
+		maxEntrySize: cfg.MaxEntrySize,
+		baseOffset:   cfg.BaseOffset,
 		size:         0,
 		closed:       false,
 		err:          nil,
@@ -172,7 +180,7 @@ func (app *Appender) init() error {
 }
 
 func (app *Appender) seek(off int64) error {
-	_, err := app.f.Seek(app.off0+off, io.SeekStart)
+	_, err := app.f.Seek(app.baseOffset+off, io.SeekStart)
 	if err != nil {
 		return ErrUnexpectedReadError
 	}
