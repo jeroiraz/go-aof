@@ -212,14 +212,14 @@ func writeInt(b []byte, n int) {
 	panic("Unreacheable point")
 }
 
-func (app *Appender) readNBytes(b []byte, n int) (int, error) {
-	if b == nil || len(b) < n || n < 1 {
+func (app *Appender) readFully(b []byte) (int, error) {
+	if b == nil {
 		return 0, ErrInvalidArguments
 	}
 
 	r := 0
-	for r < n {
-		i, err := app.r.Read(b[r:n])
+	for r < len(b) {
+		i, err := app.r.Read(b[r:])
 		r += i
 
 		if err != nil {
@@ -237,11 +237,7 @@ func (app *Appender) readNBytes(b []byte, n int) (int, error) {
 // read fills up entry. Number of bytes missing to complete the entry is returned
 func (e *Entry) read(app *Appender) (int, error) {
 	// Read entry size
-	for i := range app.sharedMem.bufRWEntrySize {
-		app.sharedMem.bufRWEntrySize[i] = 0
-	}
-
-	n, err := app.readNBytes(app.sharedMem.bufRWEntrySize, len(app.sharedMem.bufRWEntrySize))
+	n, err := app.readFully(app.sharedMem.bufRWEntrySize)
 	if err != nil && err != io.EOF {
 		return 0, err
 	}
@@ -251,16 +247,20 @@ func (e *Entry) read(app *Appender) (int, error) {
 		return 0, err
 	}
 
-	e.size = readInt(app.sharedMem.bufRWEntrySize)
-
-	if e.bytes == nil || len(e.bytes) < e.size {
-		e.bytes = make([]byte, e.size)
+	for i := n; i < len(app.sharedMem.bufRWEntrySize); i++ {
+		app.sharedMem.bufRWEntrySize[i] = 0
 	}
+
+	e.size = readInt(app.sharedMem.bufRWEntrySize)
 
 	// Read entry content if size could be fully read
 	rc := 0
 	if n == len(app.sharedMem.bufRWEntrySize) {
-		rc, err = app.readNBytes(e.bytes, e.size)
+		if e.bytes == nil || len(e.bytes) < e.size {
+			e.bytes = make([]byte, e.size)
+		}
+
+		rc, err = app.readFully(e.bytes[:e.size])
 		if err != nil && err != io.EOF {
 			return 0, ErrUnexpectedReadError
 		}
@@ -269,7 +269,7 @@ func (e *Entry) read(app *Appender) (int, error) {
 	// Read entry flag
 	app.sharedMem.bufRWEntryFlag[0] = 0
 	if rc == e.size {
-		_, err = app.readNBytes(app.sharedMem.bufRWEntryFlag, len(app.sharedMem.bufRWEntryFlag))
+		_, err = app.readFully(app.sharedMem.bufRWEntryFlag)
 		if err != nil && err != io.EOF {
 			return 0, ErrUnexpectedReadError
 		}
