@@ -25,11 +25,6 @@ func randomBytes(size int) []byte {
 	rand.Seed(time.Now().UnixNano())
 	b := make([]byte, size)
 	rand.Read(b)
-	for i, v := range b {
-		if v == 0 {
-			b[i]++
-		}
-	}
 	return b
 }
 
